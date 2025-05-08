@@ -95,6 +95,7 @@ class BaseLaplace:
         self,
         model: nn.Module,
         likelihood: Likelihood | str,
+        hessian_str: str = 'none given',
         sigma_noise: float | torch.Tensor = 1.0,
         prior_precision: float | torch.Tensor = 1.0,
         prior_mean: float | torch.Tensor = 0.0,
@@ -131,6 +132,7 @@ class BaseLaplace:
         self.sigma_noise: float | torch.Tensor = sigma_noise
         self.temperature: float = temperature
         self.enable_backprop: bool = enable_backprop
+        self.hessian_str: str = hessian_str
 
         # For models with dict-like inputs (e.g. Huggingface LLMs)
         self.dict_key_x = dict_key_x
@@ -171,10 +173,6 @@ class BaseLaplace:
     @property
     def _device(self) -> torch.device:
         return next(self.model.parameters()).device
-
-    @property
-    def _dtype(self) -> torch.dtype:
-        return next(self.model.parameters()).dtype
 
     @property
     def backend(self) -> CurvatureInterface:
@@ -228,12 +226,7 @@ class BaseLaplace:
             c = (
                 self.n_data
                 * self.n_outputs
-                * torch.log(
-                    torch.as_tensor(
-                        self.sigma_noise, device=self._device, dtype=self._dtype
-                    )
-                    * sqrt(2 * pi)
-                )
+                * torch.log(torch.as_tensor(self.sigma_noise) * sqrt(2 * pi))
             )
             return factor * self.loss - c
         else:
@@ -279,20 +272,18 @@ class BaseLaplace:
         prior_prec: torch.Tensor = (
             self.prior_precision
             if isinstance(self.prior_precision, torch.Tensor)
-            else torch.as_tensor(self.prior_precision)
+            else torch.tensor(self.prior_precision)
         )
 
         if prior_prec.ndim == 0 or len(prior_prec) == 1:  # scalar
-            return self.prior_precision * torch.ones(
-                self.n_params, device=self._device, dtype=self._dtype
-            )
+            return self.prior_precision * torch.ones(self.n_params, device=self._device)
         elif len(prior_prec) == self.n_params:  # diagonal
             return prior_prec
         elif len(prior_prec) == self.n_layers:  # per layer
             n_params_per_layer = [p.numel() for p in self.params]
             return torch.cat(
                 [
-                    prior * torch.ones(n_params, device=self._device, dtype=self._dtype)
+                    prior * torch.ones(n_params, device=self._device)
                     for prior, n_params in zip(prior_prec, n_params_per_layer)
                 ]
             )
@@ -308,18 +299,14 @@ class BaseLaplace:
     @prior_mean.setter
     def prior_mean(self, prior_mean: float | torch.Tensor) -> None:
         if np.isscalar(prior_mean) and np.isreal(prior_mean):
-            self._prior_mean = torch.as_tensor(
-                prior_mean, device=self._device, dtype=self._dtype
-            )
+            self._prior_mean = torch.tensor(prior_mean, device=self._device)
         elif isinstance(prior_mean, torch.Tensor):
             if prior_mean.ndim == 0:
-                self._prior_mean = prior_mean.reshape(-1).to(
-                    device=self._device, dtype=self._dtype
-                )
+                self._prior_mean = prior_mean.reshape(-1).to(self._device)
             elif prior_mean.ndim == 1:
                 if len(prior_mean) not in [1, self.n_params]:
                     raise ValueError("Invalid length of prior mean.")
-                self._prior_mean = prior_mean.to(device=self._device, dtype=self._dtype)
+                self._prior_mean = prior_mean
             else:
                 raise ValueError("Prior mean has too many dimensions!")
         else:
@@ -334,23 +321,17 @@ class BaseLaplace:
         self._posterior_scale = None
 
         if np.isscalar(prior_precision) and np.isreal(prior_precision):
-            self._prior_precision = torch.as_tensor(
-                [prior_precision], device=self._device, dtype=self._dtype
-            )
+            self._prior_precision = torch.tensor([prior_precision], device=self._device)
         elif isinstance(prior_precision, torch.Tensor):
             if prior_precision.ndim == 0:
                 # make dimensional
-                self._prior_precision = prior_precision.reshape(-1).to(
-                    device=self._device, dtype=self._dtype
-                )
+                self._prior_precision = prior_precision.reshape(-1).to(self._device)
             elif prior_precision.ndim == 1:
                 if len(prior_precision) not in [1, self.n_layers, self.n_params]:
                     raise ValueError(
                         "Length of prior precision does not align with architecture."
                     )
-                self._prior_precision = prior_precision.to(
-                    device=self._device, dtype=self._dtype
-                )
+                self._prior_precision = prior_precision.to(self._device)
             else:
                 raise ValueError(
                     "Prior precision needs to be at most one-dimensional tensor."
@@ -447,7 +428,7 @@ class BaseLaplace:
             self.prior_precision = (
                 init_prior_prec
                 if isinstance(init_prior_prec, torch.Tensor)
-                else torch.as_tensor(init_prior_prec)
+                else torch.tensor(init_prior_prec)
             )
 
             if (
@@ -460,7 +441,6 @@ class BaseLaplace:
                     self.n_layers,
                     self.n_params,
                     self._device,
-                    self._dtype,
                 )
 
             log_prior_prec = self.prior_precision.log()
@@ -569,20 +549,14 @@ class BaseLaplace:
         self._posterior_scale = None
 
         if np.isscalar(sigma_noise) and np.isreal(sigma_noise):
-            self._sigma_noise = torch.as_tensor(
-                sigma_noise, device=self._device, dtype=self._dtype
-            )
+            self._sigma_noise = torch.tensor(sigma_noise, device=self._device)
         elif isinstance(sigma_noise, torch.Tensor):
             if sigma_noise.ndim == 0:
-                self._sigma_noise = sigma_noise.to(
-                    device=self._device, dtype=self._dtype
-                )
+                self._sigma_noise = sigma_noise.to(self._device)
             elif sigma_noise.ndim == 1:
                 if len(sigma_noise) > 1:
                     raise ValueError("Only homoscedastic output noise supported.")
-                self._sigma_noise = sigma_noise[0].to(
-                    device=self._device, dtype=self._dtype
-                )
+                self._sigma_noise = sigma_noise[0].to(self._device)
             else:
                 raise ValueError("Sigma noise needs to be scalar or 1-dimensional.")
         else:
@@ -680,9 +654,7 @@ class BaseLaplace:
             # optional: variance correction
             if link_approx == LinkApprox.BRIDGE_NORM:
                 f_var_diag_mean = f_var_diag.mean(dim=1)
-                f_var_diag_mean /= torch.as_tensor(
-                    [K / 2], device=self._device, dtype=self._dtype
-                ).sqrt()
+                f_var_diag_mean /= torch.as_tensor([K / 2], device=self._device).sqrt()
                 f_mu /= f_var_diag_mean.sqrt().unsqueeze(-1)
                 f_var_diag /= f_var_diag_mean.unsqueeze(-1)
 
@@ -694,63 +666,7 @@ class BaseLaplace:
                 "Prediction path invalid. Check the likelihood, pred_type, link_approx combination!"
             )
 
-    def sample(
-        self, n_samples: int = 1, generator: torch.Generator | None = None
-    ) -> torch.Tensor:
-        """Sample from the Laplace posterior approximation, i.e.,
-        \\( \\theta \\sim \\mathcal{N}(\\theta_{MAP}, P^{-1})\\).
-
-        Parameters
-        ----------
-        n_samples : int, default=100
-            number of samples
-
-        generator : torch.Generator, optional
-            random number generator to control the samples
-
-        Returns
-        -------
-        samples: torch.Tensor
-        """
-        raise NotImplementedError
-
-    def functional_samples(
-        self,
-        x: torch.Tensor | MutableMapping[str, torch.Tensor | Any],
-        pred_type: PredType | str = PredType.GLM,
-        n_samples: int = 1,
-        diagonal_output: bool = False,
-        generator: torch.Generator | None = None,
-    ) -> torch.Tensor:
-        """Sample from the functional posterior on input data `x`.
-        Can be used, for example, for Thompson sampling.
-
-        Parameters
-        ----------
-        x : torch.Tensor or MutableMapping
-            input data `(batch_size, input_shape)`
-
-        pred_type : {'glm'}, default='glm'
-            type of posterior predictive, linearized GLM predictive.
-
-        n_samples : int
-            number of samples
-
-        diagonal_output : bool
-            whether to use a diagonalized glm posterior predictive on the outputs.
-            Only applies when `pred_type='glm'`.
-
-        generator : torch.Generator, optional
-            random number generator to control the samples (if sampling used)
-
-        Returns
-        -------
-        samples : torch.Tensor
-            samples `(n_samples, batch_size, output_shape)`
-        """
-        raise NotImplementedError
-
-    def _glm_functional_samples(
+    def _glm_predictive_samples(
         self,
         f_mu: torch.Tensor,
         f_var: torch.Tensor,
@@ -758,7 +674,7 @@ class BaseLaplace:
         diagonal_output: bool = False,
         generator: torch.Generator | None = None,
     ) -> torch.Tensor:
-        """Sample from the posterior functional on input data `x` using "glm" prediction
+        """Sample from the posterior predictive on input data `x` using "glm" prediction
         type.
 
         Parameters
@@ -788,45 +704,7 @@ class BaseLaplace:
         if diagonal_output:
             f_var = torch.diagonal(f_var, dim1=1, dim2=2)
 
-        return normal_samples(f_mu, f_var, n_samples, generator)
-
-    def _glm_predictive_samples(
-        self,
-        f_mu: torch.Tensor,
-        f_var: torch.Tensor,
-        n_samples: int,
-        diagonal_output: bool = False,
-        generator: torch.Generator | None = None,
-    ) -> torch.Tensor:
-        """Sample from the posterior predictive on input data `x` using "glm" prediction
-        type. I.e., the inverse-link function correponding to the likelihood is applied
-        on top of the functional sample.
-
-        Parameters
-        ----------
-        f_mu : torch.Tensor or MutableMapping
-            glm predictive mean `(batch_size, output_shape)`
-
-        f_var : torch.Tensor or MutableMapping
-            glm predictive covariances `(batch_size, output_shape, output_shape)`
-
-        n_samples : int
-            number of samples
-
-        diagonal_output : bool
-            whether to use a diagonalized glm posterior predictive on the outputs.
-
-        generator : torch.Generator, optional
-            random number generator to control the samples (if sampling used)
-
-        Returns
-        -------
-        samples : torch.Tensor
-            samples `(n_samples, batch_size, output_shape)`
-        """
-        f_samples = self._glm_functional_samples(
-            f_mu, f_var, n_samples, diagonal_output, generator
-        )
+        f_samples = normal_samples(f_mu, f_var, n_samples, generator)
 
         if self.likelihood == Likelihood.REGRESSION:
             return f_samples
@@ -847,12 +725,10 @@ class ParametricLaplace(BaseLaplace):
     a Gaussian distribution \\(\\mathcal{N}(\\theta_{MAP}, P^{-1})\\).
     The goal of this class is to compute the posterior precision \\(P\\)
     which sums as
-
-    $$
+    \\[
         P = \\sum_{n=1}^N \\nabla^2_\\theta \\log p(\\mathcal{D}_n \\mid \\theta)
         \\vert_{\\theta_{MAP}} + \\nabla^2_\\theta \\log p(\\theta) \\vert_{\\theta_{MAP}}.
-    $$
-
+    \\]
     Every subclass implements different approximations to the log likelihood Hessians,
     for example, a diagonal one. The prior is assumed to be Gaussian and therefore we have
     a simple form for \\(\\nabla^2_\\theta \\log p(\\theta) \\vert_{\\theta_{MAP}} = P_0 \\).
@@ -864,6 +740,7 @@ class ParametricLaplace(BaseLaplace):
         self,
         model: nn.Module,
         likelihood: Likelihood | str,
+        hessian_str: str = 'none given',
         sigma_noise: float | torch.Tensor = 1.0,
         prior_precision: float | torch.Tensor = 1.0,
         prior_mean: float | torch.Tensor = 0.0,
@@ -878,6 +755,7 @@ class ParametricLaplace(BaseLaplace):
         super().__init__(
             model,
             likelihood,
+            hessian_str,
             sigma_noise,
             prior_precision,
             prior_mean,
@@ -901,7 +779,7 @@ class ParametricLaplace(BaseLaplace):
         if getattr(self, "H", None) is None:
             raise AttributeError("Laplace not fitted. Run fit() first.")
 
-    def fit(
+    def fit_mine(
         self,
         train_loader: DataLoader,
         override: bool = True,
@@ -942,6 +820,79 @@ class ParametricLaplace(BaseLaplace):
             if isinstance(data, MutableMapping):  # To support Huggingface dataset
                 if "backpack" in self._backend_cls.__name__.lower() or (
                     isinstance(self, DiagLaplace) and self._backend_cls == CurvlinopsEF
+                ):
+                    raise ValueError(
+                        "Currently DiagEF is not supported under CurvlinopsEF backend "
+                        + "for custom models with non-tensor inputs "
+                        + "(https://github.com/pytorch/functorch/issues/159). Consider "
+                        + "using AsdlEF backend instead. The same limitation applies "
+                        + "to all BackPACK backend"
+                    )
+
+                out = self.model(data)
+            else:
+                X = train_loader
+                try:
+                    out = self.model(X[:1].to(self._device))
+                except (TypeError, AttributeError):
+                    out = self.model(X)
+        self.n_outputs = out.shape
+        setattr(self.model, "output_size", self.n_outputs)
+
+        N = 1
+
+        self.model.zero_grad()
+        #loss_batch, H_batch, names_, shapes_ = self._curv_closure_mine(train_loader, train_loader['labels'].to(self._device), N=N)
+        loss_batch, H_batch, names_, shapes_ = self._curv_closure_mine(train_loader,
+                                                                       train_loader['labels'].to(self._device), N=N)
+        self.loss = loss_batch
+        self.H = H_batch
+        self.names_ = names_
+
+
+        #self.n_data += N
+
+    def fit(
+            self,
+            train_loader: DataLoader,
+            override: bool = True,
+            progress_bar: bool = False,
+    ) -> None:
+        """Fit the local Laplace approximation at the parameters of the model.
+
+        Parameters
+        ----------
+        train_loader : torch.data.utils.DataLoader
+            each iterate is a training batch, either `(X, y)` tensors or a dict-like
+            object containing keys as expressed by `self.dict_key_x` and
+            `self.dict_key_y`. `train_loader.dataset` needs to be set to access
+            \\(N\\), size of the data set.
+        override : bool, default=True
+            whether to initialize H, loss, and n_data again; setting to False is useful for
+            online learning settings to accumulate a sequential posterior approximation.
+        progress_bar : bool, default=False
+            whether to show a progress bar; updated at every batch-Hessian computation.
+            Useful for very large model and large amount of data, esp. when `subset_of_weights='all'`.
+        """
+        if override:
+            self._init_H()
+            self.loss: float | torch.Tensor = 0
+            self.n_data: int = 0
+
+        self.model.eval()
+
+        self.mean: torch.Tensor = parameters_to_vector(self.params)
+        if not self.enable_backprop:
+            self.mean = self.mean.detach()
+
+        data: (
+                tuple[torch.Tensor, torch.Tensor] | MutableMapping[str, torch.Tensor | Any]
+        ) = next(iter(train_loader))
+
+        with torch.no_grad():
+            if isinstance(data, MutableMapping):  # To support Huggingface dataset
+                if "backpack" in self._backend_cls.__name__.lower() or (
+                        isinstance(self, DiagLaplace) and self._backend_cls == CurvlinopsEF
                 ):
                     raise ValueError(
                         "Currently DiagEF is not supported under CurvlinopsEF backend "
@@ -1025,10 +976,9 @@ class ParametricLaplace(BaseLaplace):
     @property
     def log_det_ratio(self) -> torch.Tensor:
         """Compute the log determinant ratio, a part of the log marginal likelihood.
-
-        $$
+        \\[
             \\log \\frac{\\det P}{\\det P_0} = \\log \\det P - \\log \\det P_0
-        $$
+        \\]
 
         Returns
         -------
@@ -1038,11 +988,9 @@ class ParametricLaplace(BaseLaplace):
 
     def square_norm(self, value) -> torch.Tensor:
         """Compute the square norm under post. Precision with `value-self.mean` as 𝛥:
-
-        $$
+        \\[
             \\Delta^\top P \\Delta
-        $$
-
+        \\]
         Returns
         -------
         square_form
@@ -1207,54 +1155,6 @@ class ParametricLaplace(BaseLaplace):
             else:  # classification; the average is computed online
                 return self._nn_predictive_classification(x, n_samples, **model_kwargs)
 
-    def functional_samples(
-        self,
-        x: torch.Tensor | MutableMapping[str, torch.Tensor | Any],
-        pred_type: PredType | str = PredType.GLM,
-        n_samples: int = 100,
-        diagonal_output: bool = False,
-        generator: torch.Generator | None = None,
-    ) -> torch.Tensor:
-        """Sample from the function-space posterior on input data `x`.
-        Can be used, for example, for Thompson sampling or to compute an arbitrary
-        expectation.
-
-        Parameters
-        ----------
-        x : torch.Tensor or MutableMapping
-            input data `(batch_size, input_shape)`
-
-        pred_type : {'glm', 'nn'}, default='glm'
-            type of posterior predictive, linearized GLM predictive or neural
-            network sampling predictive. The GLM predictive is consistent with
-            the curvature approximations used here.
-
-        n_samples : int
-            number of samples
-
-        diagonal_output : bool
-            whether to use a diagonalized glm posterior predictive on the outputs.
-            Only applies when `pred_type='glm'`.
-
-        generator : torch.Generator, optional
-            random number generator to control the samples (if sampling used)
-
-        Returns
-        -------
-        samples : torch.Tensor
-            samples `(n_samples, batch_size, output_shape)`
-        """
-        if pred_type not in PredType.__members__.values():
-            raise ValueError("Only glm and nn supported as prediction types.")
-
-        if pred_type == PredType.GLM:
-            f_mu, f_var = self._glm_predictive_distribution(x)
-            return self._glm_functional_samples(
-                f_mu, f_var, n_samples, diagonal_output, generator
-            )
-        else:  # 'nn'
-            return self._nn_functional_samples(x, n_samples, generator)
-
     def predictive_samples(
         self,
         x: torch.Tensor | MutableMapping[str, torch.Tensor | Any],
@@ -1263,9 +1163,8 @@ class ParametricLaplace(BaseLaplace):
         diagonal_output: bool = False,
         generator: torch.Generator | None = None,
     ) -> torch.Tensor:
-        """Sample from the posterior predictive on input data `x`. I.e., the respective
-        inverse-link function (e.g. softmax) is applied on top of the functional
-        sample.
+        """Sample from the posterior predictive on input data `x`.
+        Can be used, for example, for Thompson sampling.
 
         Parameters
         ----------
@@ -1300,6 +1199,7 @@ class ParametricLaplace(BaseLaplace):
             return self._glm_predictive_samples(
                 f_mu, f_var, n_samples, diagonal_output, generator
             )
+
         else:  # 'nn'
             return self._nn_predictive_samples(x, n_samples, generator)
 
@@ -1341,7 +1241,7 @@ class ParametricLaplace(BaseLaplace):
             else (f_mu, f_var)
         )
 
-    def _nn_functional_samples(
+    def _nn_predictive_samples(
         self,
         X: torch.Tensor | MutableMapping[str, torch.Tensor | Any],
         n_samples: int = 100,
@@ -1358,17 +1258,6 @@ class ParametricLaplace(BaseLaplace):
 
         vector_to_parameters(self.mean, self.params)
         fs = torch.stack(fs)
-
-        return fs
-
-    def _nn_predictive_samples(
-        self,
-        X: torch.Tensor | MutableMapping[str, torch.Tensor | Any],
-        n_samples: int = 100,
-        generator: torch.Generator | None = None,
-        **model_kwargs: dict[str, Any],
-    ) -> torch.Tensor:
-        fs = self._nn_functional_samples(X, n_samples, generator, **model_kwargs)
 
         if self.likelihood == Likelihood.CLASSIFICATION:
             fs = torch.softmax(fs, dim=-1)
@@ -1584,6 +1473,7 @@ class FullLaplace(ParametricLaplace):
         self,
         model: nn.Module,
         likelihood: Likelihood | str,
+        hessian_str: str = 'none given',
         sigma_noise: float | torch.Tensor = 1.0,
         prior_precision: float | torch.Tensor = 1.0,
         prior_mean: float | torch.Tensor = 0.0,
@@ -1597,6 +1487,7 @@ class FullLaplace(ParametricLaplace):
         super().__init__(
             model,
             likelihood,
+            hessian_str,
             sigma_noise,
             prior_precision,
             prior_mean,
@@ -1611,7 +1502,7 @@ class FullLaplace(ParametricLaplace):
 
     def _init_H(self) -> None:
         self.H: torch.Tensor = torch.zeros(
-            self.n_params, self.n_params, device=self._device, dtype=self._dtype
+            self.n_params, self.n_params, device=self._device
         )
 
     def _curv_closure(
@@ -1692,14 +1583,10 @@ class FullLaplace(ParametricLaplace):
         self, n_samples: int = 100, generator: torch.Generator | None = None
     ) -> torch.Tensor:
         samples = torch.randn(
-            n_samples,
-            self.n_params,
-            device=self._device,
-            dtype=self._dtype,
-            generator=generator,
+            n_samples, self.n_params, device=self._device, generator=generator
         )
         # (n_samples, n_params) x (n_params, n_params) -> (n_samples, n_params)
-        samples = samples @ self.posterior_scale.T
+        samples = samples @ self.posterior_scale
         return self.mean.reshape(1, self.n_params) + samples
 
 
@@ -1723,6 +1610,7 @@ class KronLaplace(ParametricLaplace):
         self,
         model: nn.Module,
         likelihood: Likelihood | str,
+        hessian_str: str = 'none given',
         sigma_noise: float | torch.Tensor = 1.0,
         prior_precision: float | torch.Tensor = 1.0,
         prior_mean: float | torch.Tensor = 0.0,
@@ -1740,6 +1628,7 @@ class KronLaplace(ParametricLaplace):
         super().__init__(
             model,
             likelihood,
+            hessian_str,
             sigma_noise,
             prior_precision,
             prior_mean,
@@ -1754,7 +1643,7 @@ class KronLaplace(ParametricLaplace):
 
     def _init_H(self) -> None:
         self.H: Kron | KronDecomposed | None = Kron.init_from_model(
-            self.params, self._device, self._dtype
+            self.params, self._device
         )
 
     def _check_H_init(self):
@@ -1768,6 +1657,16 @@ class KronLaplace(ParametricLaplace):
         N: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.backend.kron(X, y, N=N, **self._asdl_fisher_kwargs)
+
+    def _curv_closure_mine(
+        self,
+        X: torch.Tensor | MutableMapping[str, torch.Tensor | Any],
+        y: torch.Tensor,
+        N: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.backend.kron(X, y, hessian_str=self.hessian_str, N=N,**self._asdl_fisher_kwargs)
+
+
 
     @staticmethod
     def _rescale_factors(kron: Kron, factor: float) -> Kron:
@@ -1846,11 +1745,7 @@ class KronLaplace(ParametricLaplace):
         self, n_samples: int = 100, generator: torch.Generator | None = None
     ) -> torch.Tensor:
         samples = torch.randn(
-            n_samples,
-            self.n_params,
-            device=self._device,
-            dtype=self._dtype,
-            generator=generator,
+            n_samples, self.n_params, device=self._device, generator=generator
         )
         samples = self.posterior_precision.bmm(samples, exponent=-0.5)
         return self.mean.reshape(1, self.n_params) + samples.reshape(
@@ -1902,6 +1797,7 @@ class LowRankLaplace(ParametricLaplace):
         self,
         model: nn.Module,
         likelihood: Likelihood | str,
+        hessian_str: str = 'none given',
         backend: type[CurvatureInterface] = AsdfghjklHessian
         if find_spec("asdfghjkl") is not None
         else CurvatureInterface,
@@ -1923,6 +1819,7 @@ class LowRankLaplace(ParametricLaplace):
         super().__init__(
             model,
             likelihood,
+            hessian_str,
             sigma_noise=sigma_noise,
             prior_precision=prior_precision,
             prior_mean=prior_mean,
@@ -1964,19 +1861,12 @@ class LowRankLaplace(ParametricLaplace):
         if not self.enable_backprop:
             self.mean = self.mean.detach()
 
-        X, y = next(iter(train_loader))
+        X, _ = next(iter(train_loader))
         with torch.no_grad():
             try:
                 out = self.model(X[:1].to(self._device))
             except (TypeError, AttributeError):
                 out = self.model(X.to(self._device))
-
-        if self.likelihood == Likelihood.REGRESSION and y.ndim != out.ndim:
-            raise ValueError(
-                f"The model's output has {out.ndim} dims but "
-                f"the target has {y.ndim} dims."
-            )
-
         self.n_outputs = out.shape[-1]
         setattr(self.model, "output_size", self.n_outputs)
 
@@ -2056,9 +1946,15 @@ class DiagLaplace(ParametricLaplace):
     _key = ("all", "diag")
 
     def _init_H(self) -> None:
-        self.H: torch.Tensor = torch.zeros(
-            self.n_params, device=self._device, dtype=self._dtype
-        )
+        self.H: torch.Tensor = torch.zeros(self.n_params, device=self._device)
+
+    def _curv_closure_mine(
+        self,
+        X: torch.Tensor | MutableMapping[str, torch.Tensor | Any],
+        y: torch.Tensor,
+        N: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.backend.diag_mine(X, y, N=N, **self._asdl_fisher_kwargs)
 
     def _curv_closure(
         self,
@@ -2125,11 +2021,7 @@ class DiagLaplace(ParametricLaplace):
         self, n_samples: int = 100, generator: torch.Generator | None = None
     ) -> torch.Tensor:
         samples = torch.randn(
-            n_samples,
-            self.n_params,
-            device=self._device,
-            dtype=self._dtype,
-            generator=generator,
+            n_samples, self.n_params, device=self._device, generator=generator
         )
         samples = samples * self.posterior_scale.reshape(1, self.n_params)
         return self.mean.reshape(1, self.n_params) + samples
@@ -2146,7 +2038,7 @@ class FunctionalLaplace(BaseLaplace):
     See [Improving predictions of Bayesian neural nets via local linearization (Immer et al., 2021)](https://arxiv.org/abs/2008.08400)
     for more details.
 
-    Note that for `likelihood='classification'`, we approximate \\( L_{NN} \\) with a diagonal matrix
+    Note that for `likelihood='classification'`, we approximate \( L_{NN} \\) with a diagonal matrix
     ( \\( L_{NN} \\) is a block-diagonal matrix, where blocks represent Hessians of per-data-point log-likelihood w.r.t.
     neural network output \\( f \\), See Appendix [A.2.1](https://arxiv.org/abs/2008.08400) for exact definition). We
     resort to such an approximation because of the (possible) errors found in Laplace approximation for
@@ -2158,48 +2050,14 @@ class FunctionalLaplace(BaseLaplace):
 
     Parameters
     ----------
-    model : torch.nn.Module
-    likelihood : Likelihood or str in {'classification', 'regression', 'reward_modeling'}
-        determines the log likelihood Hessian approximation.
-        In the case of 'reward_modeling', it fits Laplace using the classification likelihood,
-        then does prediction as in regression likelihood. The model needs to be defined accordingly:
-        The forward pass during training takes `x.shape == (batch_size, 2, dim)` with
-        `y.shape = (batch_size,)`. Meanwhile, during evaluation `x.shape == (batch_size, dim)`.
-        Note that 'reward_modeling' only supports `KronLaplace` and `DiagLaplace`.
-    sigma_noise : torch.Tensor or float, default=1
-        observation noise for the regression setting; must be 1 for classification
-    prior_precision : torch.Tensor or float, default=1
-        prior precision of a Gaussian prior (= weight decay);
-        can be scalar, per-layer, or diagonal in the most general case
-    prior_mean : torch.Tensor or float, default=0
-        prior mean of a Gaussian prior, useful for continual learning
-    temperature : float, default=1
-        temperature of the likelihood; lower temperature leads to more
-        concentrated posterior and vice versa.
-    enable_backprop: bool, default=False
-        whether to enable backprop to the input `x` through the Laplace predictive.
-        Useful for e.g. Bayesian optimization.
-    dict_key_x: str, default='input_ids'
-        The dictionary key under which the input tensor `x` is stored. Only has effect
-        when the model takes a `MutableMapping` as the input. Useful for Huggingface
-        LLM models.
-    dict_key_y: str, default='labels'
-        The dictionary key under which the target tensor `y` is stored. Only has effect
-        when the model takes a `MutableMapping` as the input. Useful for Huggingface
-        LLM models.
-    backend : subclasses of `laplace.curvature.CurvatureInterface`
-        backend for access to curvature/Hessian approximations. Defaults to CurvlinopsGGN if None.
-    backend_kwargs : dict, default=None
-        arguments passed to the backend on initialization, for example to
-        set the number of MC samples for stochastic approximations.
-    n_subset : int
+    num_data : int
         number of data points for Subset-of-Data (SOD) approximate GP inference.
-    independent_outputs : bool
+    diagonal_kernel : bool
         GP kernel here is product of Jacobians, which results in a \\( C \\times C\\) matrix where \\(C\\) is the output
-        dimension. If `True`, only a diagonal of a GP kernel is used. This is (somewhat) equivalent to
+        dimension. If `diagonal_kernel=True`, only a diagonal of a GP kernel is used. This is (somewhat) equivalent to
         assuming independent GPs across output channels.
-    seed: int, default=0
-        Random seed for subset of data sampler.
+
+    See `BaseLaplace` class for the full interface.
     """
 
     # key to map to correct subclass of BaseLaplace, (subset of weights, Hessian structure)
@@ -2209,7 +2067,8 @@ class FunctionalLaplace(BaseLaplace):
         self,
         model: nn.Module,
         likelihood: Likelihood | str,
-        n_subset: int,
+        hessian_str: str = 'none given',
+        n_subset: int = -1,
         sigma_noise: float | torch.Tensor = 1.0,
         prior_precision: float | torch.Tensor = 1.0,
         prior_mean: float | torch.Tensor = 0.0,
@@ -2227,6 +2086,7 @@ class FunctionalLaplace(BaseLaplace):
         super().__init__(
             model,
             likelihood,
+            hessian_str,
             sigma_noise,
             prior_precision,
             prior_mean,
@@ -2273,48 +2133,38 @@ class FunctionalLaplace(BaseLaplace):
 
     def _init_K_MM(self):
         """Allocates memory for the kernel matrix evaluated at the subset of the training
-        data points. If the subset is of size \\(M\\) and the problem has \\(C\\) outputs,
-        this is a list of C \\((M,M\\)) tensors for diagonal kernel and \\((M x C, M x C)\\)
+        data points. If the subset is of size \(M\) and the problem has \(C\) outputs,
+        this is a list of C \((M,M\)) tensors for diagonal kernel and \((M x C, M x C)\)
         otherwise.
         """
         if self.independent_outputs:
             self.K_MM = [
-                torch.empty(
-                    size=(self.n_subset, self.n_subset),
-                    device=self._device,
-                    dtype=self._dtype,
-                )
+                torch.empty(size=(self.n_subset, self.n_subset), device=self._device)
                 for _ in range(self.n_outputs)
             ]
         else:
             self.K_MM = torch.empty(
                 size=(self.n_subset * self.n_outputs, self.n_subset * self.n_outputs),
                 device=self._device,
-                dtype=self._dtype,
             )
 
     def _init_Sigma_inv(self):
         """Allocates memory for the cholesky decomposition of
-        \\[
-            K_{MM} + \\Lambda_{MM}^{-1}.
-        \\]
+        \[
+            K_{MM} + \Lambda_{MM}^{-1}.
+        \]
         See See [Improving predictions of Bayesian neural nets via local linearization (Immer et al., 2021)](https://arxiv.org/abs/2008.08400)
         Equation 15 for more information.
         """
         if self.independent_outputs:
             self.Sigma_inv = [
-                torch.empty(
-                    size=(self.n_subset, self.n_subset),
-                    device=self._device,
-                    dtype=self._dtype,
-                )
+                torch.empty(size=(self.n_subset, self.n_subset), device=self._device)
                 for _ in range(self.n_outputs)
             ]
         else:
             self.Sigma_inv = torch.empty(
                 size=(self.n_subset * self.n_outputs, self.n_subset * self.n_outputs),
                 device=self._device,
-                dtype=self._dtype,
             )
 
     def _store_K_batch(self, K_batch: torch.Tensor, i: int, j: int):
@@ -2375,18 +2225,14 @@ class FunctionalLaplace(BaseLaplace):
 
     def _build_Sigma_inv(self):
         """Computes the cholesky decomposition of
-                \\[
-                    K_{MM} + \\Lambda_{MM}^{-1}.
-                \\]
-                See See [Improving predictions of Bayesian neural nets via local linearization (Immer et al., 2021)](https://arxiv.org/abs/2008.08400)
-                Equation 15 for more information.
+        \[
+            K_{MM} + \Lambda_{MM}^{-1}.
+        \]
+        See See [Improving predictions of Bayesian neural nets via local linearization (Immer et al., 2021)](https://arxiv.org/abs/2008.08400)
+        Equation 15 for more information.
 
-        <<<<<<< HEAD
-                As the diagonal approximation is performed with \\Lambda_{MM} (which is stored in self.L),
-        =======
-                As the diagonal approximation is performed with \\(\\Lambda_{MM}\\) (which is stored in self.L),
-        >>>>>>> main
-                the code is greatly simplified.
+        As the diagonal approximation is performed with \Lambda_{MM} (which is stored in self.L),
+        the code is greatly simplified.
         """
         if self.independent_outputs:
             self.Sigma_inv = [
@@ -2468,9 +2314,9 @@ class FunctionalLaplace(BaseLaplace):
         N = len(train_loader.dataset)
         self.n_data = N
 
-        assert self.n_subset <= N, (
-            "`num_data` must be less than or equal to the original number of data points."
-        )
+        assert (
+            self.n_subset <= N
+        ), "`num_data` must be less than or equal to the original number of data points."
 
         train_loader = self._get_SoD_data_loader(train_loader)
         self.train_loader = train_loader
@@ -2495,20 +2341,12 @@ class FunctionalLaplace(BaseLaplace):
 
             Js_batch, f_batch = self._jacobians(X, enable_backprop=False)
 
-            if self.likelihood == Likelihood.REGRESSION and y.ndim != out.ndim:
-                raise ValueError(
-                    f"The model's output has {out.ndim} dims but "
-                    f"the target has {y.ndim} dims."
-                )
-
             with torch.no_grad():
                 loss_batch = self.backend.factor * self.backend.lossfunc(f_batch, y)
 
-            if self.likelihood == Likelihood.REGRESSION:
+            if self.likelihood == "regression":
                 b, C = f_batch.shape
-                lambdas_batch = torch.unsqueeze(
-                    torch.eye(C, device=self._device, dtype=self._dtype), 0
-                ).repeat(b, 1, 1)
+                lambdas_batch = torch.unsqueeze(torch.eye(C), 0).repeat(b, 1, 1)
             else:
                 # second derivative of log lik is diag(p) - pp^T
                 ps = torch.softmax(f_batch, dim=-1)
@@ -2643,48 +2481,6 @@ class FunctionalLaplace(BaseLaplace):
             x, likelihood, joint, link_approx, n_samples, diagonal_output
         )
 
-    def functional_samples(
-        self,
-        x: torch.Tensor | MutableMapping[str, torch.Tensor | Any],
-        pred_type: PredType | str = PredType.GLM,
-        n_samples: int = 100,
-        diagonal_output: bool = False,
-        generator: torch.Generator | None = None,
-    ) -> torch.Tensor:
-        """Sample from the functional posterior on input data `x`.
-        Can be used, for example, for Thompson sampling.
-
-        Parameters
-        ----------
-        x : torch.Tensor or MutableMapping
-            input data `(batch_size, input_shape)`
-
-        pred_type : {'glm'}, default='glm'
-            type of posterior predictive, linearized GLM predictive.
-
-        n_samples : int
-            number of samples
-
-        diagonal_output : bool
-            whether to use a diagonalized glm posterior predictive on the outputs.
-            Only applies when `pred_type='glm'`.
-
-        generator : torch.Generator, optional
-            random number generator to control the samples (if sampling used)
-
-        Returns
-        -------
-        samples : torch.Tensor
-            samples `(n_samples, batch_size, output_shape)`
-        """
-        if pred_type not in PredType.__members__.values():
-            raise ValueError("Only glm  supported as prediction type.")
-
-        f_mu, f_var = self._glm_predictive_distribution(x)
-        return self._glm_functional_samples(
-            f_mu, f_var, n_samples, diagonal_output, generator
-        )
-
     def predictive_samples(
         self,
         x: torch.Tensor | MutableMapping[str, torch.Tensor | Any],
@@ -2694,8 +2490,7 @@ class FunctionalLaplace(BaseLaplace):
         generator: torch.Generator | None = None,
     ) -> torch.Tensor:
         """Sample from the posterior predictive on input data `x`.
-        I.e., the corresponding inverse-link function is applied on top of the
-        functional sample. Can be used, for example, for Thompson sampling.
+        Can be used, for example, for Thompson sampling.
 
         Parameters
         ----------
@@ -2735,9 +2530,7 @@ class FunctionalLaplace(BaseLaplace):
     def functional_variance(self, Js_star: torch.Tensor) -> torch.Tensor:
         """GP posterior variance:
 
-        $$
-            k_{**} - K_{*M} (K_{MM}+ L_{MM}^{-1})^{-1} K_{M*}
-        $$
+        \\[ k_{**} - K_{*M} (K_{MM}+ L_{MM}^{-1})^{-1} K_{M*}\\]
 
         Parameters
         ----------
@@ -2774,9 +2567,7 @@ class FunctionalLaplace(BaseLaplace):
     def functional_covariance(self, Js_star: torch.Tensor) -> torch.Tensor:
         """GP posterior covariance:
 
-        $$
-            k_{**} - K_{*M} (K_{MM}+ L_{MM}^{-1})^{-1} K_{M*}
-        $$
+        \\[ k_{**} - K_{*M} (K_{MM}+ L_{MM}^{-1})^{-1} K_{M*}\\]
 
         Parameters
         ----------
@@ -2871,59 +2662,43 @@ class FunctionalLaplace(BaseLaplace):
         [GP book R&W 2006](http://www.gaussianprocess.org/gpml/chapters/) with
         (note that we always use diagonal approximation \\(D\\) of the Hessian of log likelihood w.r.t. \\(f\\)):
 
-        log determinant term := \\( \\log | I + D^{1/2}K D^{1/2} | \\)
+        log determinant term := \\( \log | I + D^{1/2}K D^{1/2} | \\)
 
         For `regression`, we use ["standard" GP marginal likelihood](https://stats.stackexchange.com/questions/280105/log-marginal-likelihood-for-gaussian-process):
 
-        log determinant term := \\( \\log | K + \\sigma_2 I | \\)
+        log determinant term := \\( \log | K + \\sigma_2 I | \\)
         """
         if self.likelihood == Likelihood.REGRESSION:
             if self.independent_outputs:
-                log_det = torch.tensor(
-                    0.0, requires_grad=True, device=self._device, dtype=self._dtype
-                )
+                log_det = torch.tensor(0.0, requires_grad=True)
                 for c in range(self.n_outputs):
                     log_det = log_det + torch.logdet(
                         self.gp_kernel_prior_variance * self.K_MM[c]
-                        + torch.eye(
-                            n=self.K_MM[c].shape[0],
-                            device=self._device,
-                            dtype=self._dtype,
-                        )
+                        + torch.eye(n=self.K_MM[c].shape[0], device=self._device)
                         * self.sigma_noise.square()
                     )
                 return log_det
             else:
                 return torch.logdet(
                     self.gp_kernel_prior_variance * self.K_MM
-                    + torch.eye(
-                        n=self.K_MM.shape[0], device=self._device, dtype=self._dtype
-                    )
+                    + torch.eye(n=self.K_MM.shape[0], device=self._device)
                     * self.sigma_noise.square()
                 )
         else:
             if self.independent_outputs:
-                log_det = torch.tensor(
-                    0.0, requires_grad=True, device=self._device, dtype=self._dtype
-                )
+                log_det = torch.tensor(0.0, requires_grad=True)
                 for c in range(self.n_outputs):
                     W = torch.sqrt(self._H_factor * self.L[c])
                     log_det = log_det + torch.logdet(
                         W[:, None] * self.gp_kernel_prior_variance * self.K_MM[c] * W
-                        + torch.eye(
-                            n=self.K_MM[c].shape[0],
-                            device=self._device,
-                            dtype=self._dtype,
-                        )
+                        + torch.eye(n=self.K_MM[c].shape[0], device=self._device)
                     )
                 return log_det
             else:
                 W = torch.sqrt(self._H_factor * self.L)
                 return torch.logdet(
                     W[:, None] * self.gp_kernel_prior_variance * self.K_MM * W
-                    + torch.eye(
-                        n=self.K_MM.shape[0], device=self._device, dtype=self._dtype
-                    )
+                    + torch.eye(n=self.K_MM.shape[0], device=self._device)
                 )
 
     @property
@@ -2931,7 +2706,7 @@ class FunctionalLaplace(BaseLaplace):
         """Compute scatter term in GP log marginal likelihood.
 
         For `classification` we use eq. (3.44) from Chapter 3.5 from
-        [GP book R&W 2006](http://www.gaussianprocess.org/gpml/chapters/) with \\(\\hat{f} = f \\):
+        [GP book R&W 2006](http://www.gaussianprocess.org/gpml/chapters/) with \\(\hat{f} = f \\):
 
         scatter term := \\( f K^{-1} f^{T} \\)
 
@@ -2947,18 +2722,13 @@ class FunctionalLaplace(BaseLaplace):
         else:
             noise = eps
         if self.independent_outputs:
-            scatter = torch.tensor(
-                0.0, requires_grad=True, device=self._device, dtype=self._dtype
-            )
+            scatter = torch.tensor(0.0, requires_grad=True)
             for c in range(self.n_outputs):
                 m = self.K_MM[c].shape[0]
                 mu_term = torch.linalg.solve(
                     torch.linalg.cholesky(
                         self.gp_kernel_prior_variance * self.K_MM[c]
-                        + torch.diag(
-                            torch.ones(m, device=self._device, dtype=self._dtype)
-                            * noise
-                        )
+                        + torch.diag(torch.ones(m, device=self._device) * noise)
                     ),
                     self.mu[:, c],
                 )
@@ -2968,9 +2738,7 @@ class FunctionalLaplace(BaseLaplace):
             mu_term = torch.linalg.solve(
                 torch.linalg.cholesky(
                     self.gp_kernel_prior_variance * self.K_MM
-                    + torch.diag(
-                        torch.ones(m, device=self._device, dtype=self._dtype) * noise
-                    )
+                    + torch.diag(torch.ones(m, device=self._device) * noise)
                 ),
                 self.mu.reshape(-1),
             )
@@ -3044,7 +2812,6 @@ class FunctionalLaplace(BaseLaplace):
             kernel = torch.empty(
                 (jacobians.shape[0], jacobians_2.shape[0], self.n_outputs),
                 device=jacobians.device,
-                dtype=self._dtype,
             )
             for c in range(self.n_outputs):
                 kernel[:, :, c] = torch.einsum(
@@ -3081,9 +2848,7 @@ class FunctionalLaplace(BaseLaplace):
         else:
             if self.independent_outputs:
                 kernel = torch.empty(
-                    (jacobians.shape[0], self.n_outputs),
-                    device=jacobians.device,
-                    dtype=self._dtype,
+                    (jacobians.shape[0], self.n_outputs), device=jacobians.device
                 )
                 for c in range(self.n_outputs):
                     kernel[:, c] = torch.norm(jacobians[:, c, :], dim=1) ** 2
@@ -3111,7 +2876,6 @@ class FunctionalLaplace(BaseLaplace):
             kernel = torch.empty(
                 (jacobians.shape[0], jacobians_2.shape[0], self.n_outputs),
                 device=jacobians.device,
-                dtype=self._dtype,
             )
             for c in range(self.n_outputs):
                 kernel[:, :, c] = torch.einsum(
@@ -3200,23 +2964,17 @@ class FunctionalLaplace(BaseLaplace):
     def prior_precision(self, prior_precision):
         self._posterior_scale = None
         if np.isscalar(prior_precision) and np.isreal(prior_precision):
-            self._prior_precision = torch.as_tensor(
-                [prior_precision], device=self._device, dtype=self._dtype
-            )
+            self._prior_precision = torch.tensor([prior_precision], device=self._device)
         elif torch.is_tensor(prior_precision):
             if prior_precision.ndim == 0:
                 # make dimensional
-                self._prior_precision = prior_precision.reshape(-1).to(
-                    device=self._device, dtype=self._dtype
-                )
+                self._prior_precision = prior_precision.reshape(-1).to(self._device)
             elif prior_precision.ndim == 1:
                 if len(prior_precision) not in [1, self.n_layers, self.n_params]:
                     raise ValueError(
                         "Length of prior precision does not align with architecture."
                     )
-                self._prior_precision = prior_precision.to(
-                    device=self._device, dtype=self._dtype
-                )
+                self._prior_precision = prior_precision.to(self._device)
             else:
                 raise ValueError(
                     "Prior precision needs to be at most one-dimensional tensor."

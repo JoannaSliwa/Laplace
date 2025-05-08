@@ -43,12 +43,10 @@ class LLLaplace(ParametricLaplace):
     are treated probabilistically.
     The goal of this class is to compute the posterior precision \\(P\\)
     which sums as
-
-    $$
+    \\[
         P = \\sum_{n=1}^N \\nabla^2_\\theta \\log p(\\mathcal{D}_n \\mid \\theta)
         \\vert_{\\theta_{MAP}} + \\nabla^2_\\theta \\log p(\\theta) \\vert_{\\theta_{MAP}}.
-    $$
-
+    \\]
     Every subclass implements different approximations to the log likelihood Hessians,
     for example, a diagonal one. The prior is assumed to be Gaussian and therefore we have
     a simple form for \\(\\nabla^2_\\theta \\log p(\\theta) \\vert_{\\theta_{MAP}} = P_0 \\).
@@ -108,7 +106,7 @@ class LLLaplace(ParametricLaplace):
         temperature: float = 1.0,
         enable_backprop: bool = False,
         feature_reduction: FeatureReduction | str | None = None,
-        dict_key_x: str = "input_ids",
+        dict_key_x: str = "inputs_id",
         dict_key_y: str = "labels",
         backend: type[CurvatureInterface] | None = None,
         last_layer_name: str | None = None,
@@ -201,7 +199,7 @@ class LLLaplace(ParametricLaplace):
             self.prior_mean: float | torch.Tensor = self._prior_mean
             self._init_H()
 
-        super().fit(train_loader, override=override, progress_bar=progress_bar)
+        super().fit(train_loader, override=override)
         self.mean: torch.Tensor = parameters_to_vector(
             self.model.last_layer.parameters()
         )
@@ -406,7 +404,7 @@ class KronLLLaplace(LLLaplace, KronLaplace):
         temperature: float = 1.0,
         enable_backprop: bool = False,
         feature_reduction: FeatureReduction | str | None = None,
-        dict_key_x: str = "input_ids",
+        dict_key_x: str = "inputs_id",
         dict_key_y: str = "labels",
         backend: type[CurvatureInterface] | None = None,
         last_layer_name: str | None = None,
@@ -433,7 +431,7 @@ class KronLLLaplace(LLLaplace, KronLaplace):
         )
 
     def _init_H(self) -> None:
-        self.H = Kron.init_from_model(self.model.last_layer, self._device, self._dtype)
+        self.H = Kron.init_from_model(self.model.last_layer, self._device)
 
     def functional_variance_fast(self, X):
         raise NotImplementedError
@@ -509,8 +507,8 @@ class DiagLLLaplace(LLLaplace, DiagLaplace):
 class FunctionalLLLaplace(FunctionalLaplace):
     """Here not much changes in terms of GP inference compared to FunctionalLaplace class.
     Since now we treat only the last layer probabilistically and the rest of the network is used as a "fixed feature
-    extractor", that means that the \\(X \\in \\mathbb{R}^{M \\times D}\\) in GP inference changes
-    to \\(\\tilde{X} \\in \\mathbb{R}^{M \\times l_{n-1}} \\),  where \\(l_{n-1}\\) is the dimension of the output
+    extractor", that means that the \\(X \in \mathbb{R}^{M \\times D}\\) in GP inference changes
+    to \\(\\tilde{X} \\in \mathbb{R}^{M \\times l_{n-1}} \\),  where \\(l_{n-1}\\) is the dimension of the output
     of the penultimate NN layer.
 
     See `FunctionalLaplace` for the full interface.
@@ -529,10 +527,10 @@ class FunctionalLLLaplace(FunctionalLaplace):
         prior_mean: float | torch.Tensor = 0.0,
         temperature: float = 1.0,
         enable_backprop: bool = False,
-        feature_reduction: FeatureReduction | str | None = None,
-        dict_key_x: str = "input_ids",
+        feature_reduction: FeatureReduction = None,
+        dict_key_x: str = "inputs_id",
         dict_key_y: str = "labels",
-        last_layer_name: str | None = None,
+        last_layer_name: str = None,
         backend: type[CurvatureInterface] | None = BackPackGGN,
         backend_kwargs: dict[str, Any] | None = None,
         independent_outputs: bool = False,
@@ -574,7 +572,7 @@ class FunctionalLLLaplace(FunctionalLaplace):
             self.prior_mean = prior_mean
         self._backend_kwargs["last_layer"] = True
 
-    def fit(self, train_loader: DataLoader, progress_bar: bool = False) -> None:
+    def fit(self, train_loader: DataLoader) -> None:
         """Fit the Laplace approximation of a GP posterior.
 
         Parameters
@@ -582,8 +580,6 @@ class FunctionalLLLaplace(FunctionalLaplace):
         train_loader : torch.data.utils.DataLoader
             `train_loader.dataset` needs to be set to access \\(N\\), size of the data set
             `train_loader.batch_size` needs to be set to access \\(b\\) batch_size
-        progress_bar : bool
-            whether to show a progress bar during the fitting process.
         """
         self.model.eval()
 
@@ -600,7 +596,7 @@ class FunctionalLLLaplace(FunctionalLaplace):
             self.prior_precision = self._prior_precision
             self.prior_mean = self._prior_mean
 
-        super().fit(train_loader, progress_bar=progress_bar)
+        super().fit(train_loader)
 
     def _jacobians(self, X: torch.Tensor, enable_backprop: bool = None) -> torch.Tensor:
         """

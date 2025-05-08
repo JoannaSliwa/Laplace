@@ -85,10 +85,59 @@ class CurvatureInterface:
     def _model(self) -> nn.Module:
         return self.model.last_layer if self.last_layer else self.model
 
-    def jacobians(
+    def jacobians_mine(
         self,
         x: torch.Tensor | MutableMapping[str, torch.Tensor | Any],
         enable_backprop: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute Jacobians \\(\\nabla_{\\theta} f(x;\\theta)\\) at current parameter \\(\\theta\\),
+        via torch.func.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            input data `(batch, input_shape)` on compatible device with model.
+        enable_backprop : bool, default = False
+            whether to enable backprop through the Js and f w.r.t. x
+
+        Returns
+        -------
+        Js : torch.Tensor
+            Jacobians `(batch, parameters, outputs)`
+        f : torch.Tensor
+            output function `(batch, outputs)`
+        """
+
+        def model_fn_params_only(params_dict, buffers_dict):
+            out = torch.func.functional_call(self.model, (params_dict, buffers_dict), x)
+            return out, out
+
+        Js, f = torch.func.jacrev(model_fn_params_only, has_aux=True)(
+            self.params_dict, self.buffers_dict
+        )
+
+        # Concatenate over flattened parameters
+        Js_ = [
+            j.flatten(start_dim=-p.dim())
+            for j, p in zip(Js.values(), self.params_dict.values())
+        ]
+        names_order = list(Js.keys())
+        sizes_of_layers = [
+            j.shape
+            for j in Js.values()
+        ]
+
+        Js = torch.cat(Js_, dim=-1)
+
+        if self.subnetwork_indices is not None:
+            Js = Js[:, :, self.subnetwork_indices]
+
+        return (Js, f, names_order, sizes_of_layers) if enable_backprop else (Js.detach(), f.detach(), names_order, sizes_of_layers)
+
+    def jacobians(
+            self,
+            x: torch.Tensor | MutableMapping[str, torch.Tensor | Any],
+            enable_backprop: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute Jacobians \\(\\nabla_{\\theta} f(x;\\theta)\\) at current parameter \\(\\theta\\),
         via torch.func.
@@ -153,9 +202,8 @@ class CurvatureInterface:
         output_size = int(f.numel() / bsize)
 
         # calculate Jacobians using the feature vector 'phi'
-        p = next(self.model.parameters())
         identity = (
-            torch.eye(output_size, device=p.device, dtype=p.dtype)
+            torch.eye(output_size, device=next(self.model.parameters()).device)
             .unsqueeze(0)
             .tile(bsize, 1, 1)
         )
@@ -193,19 +241,42 @@ class CurvatureInterface:
             )
             loss = torch.func.functional_call(self.lossfunc, {}, (output, y))
             return loss, loss
+        def model_fn_params_only(params_dict, buffers_dict):
+            out = torch.func.functional_call(self.model, (params_dict, buffers_dict), x)
+            return out, out
 
-        grad_fn = torch.func.grad(loss_single, argnums=2, has_aux=True)
-        batch_grad_fn = torch.func.vmap(grad_fn, in_dims=(0, 0, None, None))
+        if isinstance(x, MutableMapping):
+            Gs, loss = torch.func.jacrev(model_fn_params_only, has_aux=True)(
+                self.params_dict, self.buffers_dict)
 
-        batch_grad, batch_loss = batch_grad_fn(
-            x, y, self.params_dict, self.buffers_dict
-        )
-        Gs = torch.cat([bg.flatten(start_dim=1) for bg in batch_grad.values()], dim=1)
+            Gs_ = [
+                j.flatten(start_dim=-p.dim())
+                for j, p in zip(Js.values(), self.params_dict.values())
+            ]
+            names_order = list(Gs.keys())
+            sizes_of_layers = [
+                j.shape
+                for j in Gs.values()
+            ]
 
-        if self.subnetwork_indices is not None:
-            Gs = Gs[:, self.subnetwork_indices]
+            Gs = torch.cat(Gs_, dim=-1)
 
-        loss = batch_loss.sum(0)
+            if self.subnetwork_indices is not None:
+                Gs =Gs[:, :, self.subnetwork_indices]
+        else:
+            grad_fn = torch.func.grad(loss_single, argnums=2, has_aux=True)
+            batch_grad_fn = torch.func.vmap(grad_fn, in_dims=(0, 0, None, None))
+
+
+            batch_grad, batch_loss = batch_grad_fn(
+                x, y, self.params_dict, self.buffers_dict
+            )
+            Gs = torch.cat([bg.flatten(start_dim=1) for bg in batch_grad.values()], dim=1)
+
+            if self.subnetwork_indices is not None:
+                Gs = Gs[:, self.subnetwork_indices]
+
+            loss = batch_loss.sum(0)
 
         return Gs, loss
 
@@ -346,8 +417,7 @@ class GGNInterface(CurvatureInterface):
 
         for _ in range(self.num_samples):
             if self.likelihood == "regression":
-                # N(y | f, 1)
-                y_sample = f + torch.randn(f.shape, device=f.device, dtype=f.dtype)
+                y_sample = f + torch.randn(f.shape, device=f.device)  # N(y | f, 1)
                 grad_sample = f - y_sample  # functional MSE grad
             else:  # classification with softmax
                 y_sample = torch.distributions.Multinomial(logits=f).sample()
@@ -431,6 +501,19 @@ class GGNInterface(CurvatureInterface):
             H = torch.einsum("bcp,bcp->p", Js, Js)
 
         return loss.detach(), H.detach()
+
+    def diag_mine(
+            self,
+            x: torch.Tensor | MutableMapping[str, torch.Tensor | Any],
+            y: torch.Tensor,
+            **kwargs: dict[str, Any],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        Js, f, names_, shapes_ = self.last_layer_jacobians(x) if self.last_layer else self.jacobians_mine(x)
+        loss = f
+
+        H = Js**2
+
+        return loss.detach(), H.detach(), names_, shapes_
 
 
 class EFInterface(CurvatureInterface):

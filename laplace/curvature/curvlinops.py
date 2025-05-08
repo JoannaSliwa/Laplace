@@ -11,6 +11,7 @@ from curvlinops import (
     GGNLinearOperator,
     HessianLinearOperator,
     KFACLinearOperator,
+    KFACLinearOperator_CrossVersion
 )
 from curvlinops._base import _LinearOperator
 from torch import nn
@@ -58,8 +59,30 @@ class CurvlinopsInterface(CurvatureInterface):
             if name not in linop._mapping.keys():
                 continue
 
-            A = linop._input_covariances[name]
-            B = linop._gradient_covariances[name]
+            A = linop._input_covariances[name] #this is matrix A
+            B = linop._gradient_covariances[name] #this is matrix G
+
+            if hasattr(module, "bias") and module.bias is not None:
+                kfacs.append([B, A])
+                kfacs.append([B])
+            elif hasattr(module, "weight"):
+                p, q = B.numel(), A.numel()
+                if p == q == 1:
+                    kfacs.append([B * A])
+                else:
+                    kfacs.append([B, A])
+            else:
+                raise ValueError(f"Whats happening with {module}?")
+        return Kron(kfacs)
+
+    def _get_kron_factors_cross(self, linop: KFACLinearOperator) -> Kron:
+        kfacs = list()
+        for name, module in self.model.named_modules():
+            if name not in list(linop._mapping.keys())[::2]:
+                continue
+
+            A = linop._cross_input_covariances[name]  # this is matrix A
+            B = linop._cross_gradient_covariances[name]  # this is matrix G
 
             if hasattr(module, "bias") and module.bias is not None:
                 kfacs.append([B, A])
@@ -78,34 +101,78 @@ class CurvlinopsInterface(CurvatureInterface):
         self,
         x: torch.Tensor | MutableMapping[str, torch.Tensor | Any],
         y: torch.Tensor,
+        hessian_str: str,
         N: int,
         **kwargs: dict[str, Any],
     ) -> tuple[torch.Tensor, Kron]:
         if isinstance(x, (dict, MutableMapping)):
             kwargs["batch_size_fn"] = lambda x: x[self.dict_key_x].shape[0]
 
-        linop = KFACLinearOperator(
-            self.model,
-            self.lossfunc,
-            self.params,
-            [(x, y)],
-            fisher_type=self._kron_fisher_type,
-            separate_weight_and_bias=True,
-            check_deterministic=False,  # To avoid overhead
-            # `kwargs` for `mc_samples` when `stochastic=True` and `kfac_approx` to
-            # choose between `'expand'` and `'reduce'`.
-            # Defaults to `mc_samples=1` and `kfac_approx='expand'.
-            **kwargs,
-        )
-        linop._compute_kfac()
+        if hessian_str == 'kron':
+            linop = KFACLinearOperator(
+                self.model,
+                self.lossfunc,
+                self.params,
+                [(x, y)],
+                fisher_type=self._kron_fisher_type,
+                separate_weight_and_bias=True,
+                check_deterministic=False,  # To avoid overhead
+                # `kwargs` for `mc_samples` when `stochastic=True` and `kfac_approx` to
+                # choose between `'expand'` and `'reduce'`.
+                # Defaults to `mc_samples=1` and `kfac_approx='expand'.
+                **kwargs,
+            )
+            linop._compute_kfac()
 
-        kron = self._get_kron_factors(linop)
-        kron = self._rescale_kron_factors(kron, len(y), N)
-        kron *= self.factor
+            kron = self._get_kron_factors(linop)
+            kron = self._rescale_kron_factors(kron, len(y), N)
+            kron *= self.factor
+            y = y[:, 0].to("mps") #TODO THIS IS MINE
+            x = {key: value.to("mps") for key, value in x.items()} #TODO THIS IS MINE
+            loss = self.lossfunc(self.model(x), y)
+            names_order = list(self.params_dict.keys())
+            sizes_of_layers = [
+                j.shape
+                for j in self.params
+            ]
 
-        loss = self.lossfunc(self.model(x), y)
+            return self.factor * loss.detach(), kron, names_order, sizes_of_layers #TODO HERE CAHNGE
 
-        return self.factor * loss.detach(), kron
+        elif hessian_str == 'kron-cross':
+            linop = KFACLinearOperator_CrossVersion(
+                self.model,
+                self.lossfunc,
+                self.params,
+                [(x, y)],
+                fisher_type=self._kron_fisher_type,
+                separate_weight_and_bias=True,
+                names_list=list(self.params_dict.keys()),
+                check_deterministic=False,  # To avoid overhead
+                # `kwargs` for `mc_samples` when `stochastic=True` and `kfac_approx` to
+                # choose between `'expand'` and `'reduce'`.
+                # Defaults to `mc_samples=1` and `kfac_approx='expand'.
+                **kwargs,
+            )
+
+            linop._compute_kfac()
+
+            kron = self._get_kron_factors(linop)
+            kronc = self._get_kron_factors_cross(linop)
+            kron = self._rescale_kron_factors(kron, len(y), N)
+            kronc = self._rescale_kron_factors(kronc, len(y), N)
+            kron *= self.factor
+            kronc *= self.factor
+            y = y[:, 0].to("mps") #TODO THIS IS MINE
+            x = {key: value.to("mps") for key, value in x.items()} #TODO THIS IS MINE
+            loss = self.lossfunc(self.model(x), y)
+            names_order = list(self.params_dict.keys())
+            sizes_of_layers = [
+                j.shape
+                for j in self.params
+            ]
+
+            return self.factor * loss.detach(), (kron,kronc), names_order, sizes_of_layers #TODO HERE CAHNGE
+
 
     def full(
         self,
@@ -129,10 +196,9 @@ class CurvlinopsInterface(CurvatureInterface):
             check_deterministic=False,
             **curvlinops_kwargs,
         )
-
-        p = next(self.model.parameters())
         H = torch.as_tensor(
-            linop @ torch.eye(linop.shape[0]), device=p.device, dtype=p.dtype
+            linop @ torch.eye(linop.shape[0]),
+            device=next(self.model.parameters()).device,
         )
 
         f = self.model(x)

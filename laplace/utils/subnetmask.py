@@ -356,7 +356,7 @@ class ModuleNameSubnetMask(SubnetMask):
     Parameters
     ----------
     model : torch.nn.Module
-    module_names: List[str]
+    parameter_names: List[str]
         list of names of the modules (as in `model.named_modules()`) that define the subnetwork;
         the modules cannot have children, i.e. need to be leaf modules
     """
