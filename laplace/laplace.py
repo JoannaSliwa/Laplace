@@ -13,7 +13,6 @@ from laplace.utils.enums import (
 def Laplace(
     model: torch.nn.Module,
     likelihood: Likelihood | str,
-    hessian_name: str,
     subset_of_weights: SubsetOfWeights | str = SubsetOfWeights.LAST_LAYER,
     hessian_structure: HessianStructure | str = HessianStructure.KRON,
     *args,
@@ -45,7 +44,8 @@ def Laplace(
         if hasattr(subclass, "_key")
     }
     laplace_class = laplace_map[(subset_of_weights, hessian_structure)]
-    return laplace_class(model, likelihood, hessian_str = hessian_name , *args, **kwargs)
+    print(model, subset_of_weights, hessian_structure)
+    return laplace_class(model, likelihood , *args, **kwargs)
 
 
 def _all_subclasses(cls) -> set:

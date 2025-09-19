@@ -8,6 +8,17 @@ from torch.nn import CrossEntropyLoss, MSELoss
 
 from laplace.utils import Kron, Likelihood
 
+def log_mem(tag=""):
+    if torch.cuda.is_available():
+        alloc = torch.cuda.memory_allocated() / 1e9
+        reserved = torch.cuda.memory_reserved() / 1e9
+        peak = torch.cuda.max_memory_allocated() / 1e9
+        print(f"[{tag}] alloc={alloc:.2f} GB reserved={reserved:.2f} GB peak={peak:.2f} GB", flush=True)
+    else:
+        cur = torch.mps.current_allocated_memory()
+        drv = torch.mps.driver_allocated_memory()
+        print(f"[MPS] current={cur / 1e9:.2f} GB, driver={drv / 1e9:.2f} GB")
+
 
 class CurvatureInterface:
     """Interface to access curvature for a model and corresponding likelihood.
@@ -110,12 +121,16 @@ class CurvatureInterface:
 
         def model_fn_params_only(params_dict, buffers_dict):
             out = torch.func.functional_call(self.model, (params_dict, buffers_dict), x)
-            return out, out
+            return out
 
-        Js, f = torch.func.jacrev(model_fn_params_only, has_aux=True)(
-            self.params_dict, self.buffers_dict
-        )
+        print('bef')
+        print(x['input_ids'].shape)
+        log_mem()
 
+        Js, f = torch.func.grad_and_value(model_fn_params_only, has_aux=False)(
+                    self.params_dict, self.buffers_dict)
+        print('after')
+        log_mem()
         # Concatenate over flattened parameters
         Js_ = [
             j.flatten(start_dim=-p.dim())
@@ -131,7 +146,7 @@ class CurvatureInterface:
 
         if self.subnetwork_indices is not None:
             Js = Js[:, :, self.subnetwork_indices]
-
+        log_mem()
         return (Js, f, names_order, sizes_of_layers) if enable_backprop else (Js.detach(), f.detach(), names_order, sizes_of_layers)
 
     def jacobians(
@@ -508,6 +523,9 @@ class GGNInterface(CurvatureInterface):
             y: torch.Tensor,
             **kwargs: dict[str, Any],
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        print('befbef')
+        log_mem()
+
         Js, f, names_, shapes_ = self.last_layer_jacobians(x) if self.last_layer else self.jacobians_mine(x)
         loss = f
 

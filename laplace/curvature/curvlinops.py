@@ -55,32 +55,37 @@ class CurvlinopsInterface(CurvatureInterface):
 
     def _get_kron_factors(self, linop: KFACLinearOperator) -> Kron:
         kfacs = list()
+        names_ = []
         for name, module in self.model.named_modules():
             if name not in linop._mapping.keys():
                 continue
 
             A = linop._input_covariances[name] #this is matrix A
             B = linop._gradient_covariances[name] #this is matrix G
+            print('_get_kron_factors', A.dtype, B.dtype)
 
             if hasattr(module, "bias") and module.bias is not None:
                 kfacs.append([B, A])
                 kfacs.append([B])
+                names_.append(name+'.bias')
             elif hasattr(module, "weight"):
                 p, q = B.numel(), A.numel()
                 if p == q == 1:
                     kfacs.append([B * A])
                 else:
                     kfacs.append([B, A])
+                names_.append(name + '.weight')
             else:
                 raise ValueError(f"Whats happening with {module}?")
-        return Kron(kfacs)
+        return Kron(kfacs), names_
 
     def _get_kron_factors_cross(self, linop: KFACLinearOperator) -> Kron:
         kfacs = list()
+        names_ = []
         for name, module in self.model.named_modules():
             if name not in list(linop._mapping.keys())[::2]:
                 continue
-
+            names_.append(name)
             A = linop._cross_input_covariances[name]  # this is matrix A
             B = linop._cross_gradient_covariances[name]  # this is matrix G
 
@@ -95,14 +100,14 @@ class CurvlinopsInterface(CurvatureInterface):
                     kfacs.append([B, A])
             else:
                 raise ValueError(f"Whats happening with {module}?")
-        return Kron(kfacs)
+        return Kron(kfacs), names_
 
     def kron(
         self,
         x: torch.Tensor | MutableMapping[str, torch.Tensor | Any],
         y: torch.Tensor,
-        hessian_str: str,
         N: int,
+        hessian_str: str = "kron",
         **kwargs: dict[str, Any],
     ) -> tuple[torch.Tensor, Kron]:
         if isinstance(x, (dict, MutableMapping)):
@@ -122,21 +127,26 @@ class CurvlinopsInterface(CurvatureInterface):
                 # Defaults to `mc_samples=1` and `kfac_approx='expand'.
                 **kwargs,
             )
+            print('Linop',linop)
             linop._compute_kfac()
 
-            kron = self._get_kron_factors(linop)
+            kron, names_ = self._get_kron_factors(linop)
+            print('kron', kron.kfacs[0][0][0].dtype)
             kron = self._rescale_kron_factors(kron, len(y), N)
+            print('kron', kron.kfacs[0][0][0].dtype)
             kron *= self.factor
-            y = y[:, 0].to("mps") #TODO THIS IS MINE
-            x = {key: value.to("mps") for key, value in x.items()} #TODO THIS IS MINE
+            print('kron', kron.kfacs[0][0][0].dtype)
+            device_used = next(self.model.parameters()).device
+            y = y[:, 0].to(device_used, non_blocking=True) #TODO THIS IS MINE
+            x = {key: value.to(device_used, non_blocking=True) for key, value in x.items()} #TODO THIS IS MINE
             loss = self.lossfunc(self.model(x), y)
-            names_order = list(self.params_dict.keys())
+            #names_order = list(self.params_dict.keys())
             sizes_of_layers = [
                 j.shape
                 for j in self.params
             ]
 
-            return self.factor * loss.detach(), kron, names_order, sizes_of_layers #TODO HERE CAHNGE
+            return self.factor * loss.detach(), kron, names_, sizes_of_layers #TODO HERE CAHNGE
 
         elif hessian_str == 'kron-cross':
             linop = KFACLinearOperator_CrossVersion(
@@ -156,14 +166,15 @@ class CurvlinopsInterface(CurvatureInterface):
 
             linop._compute_kfac()
 
-            kron = self._get_kron_factors(linop)
-            kronc = self._get_kron_factors_cross(linop)
+            kron, names_ = self._get_kron_factors(linop)
+            kronc, names2_ = self._get_kron_factors_cross(linop)
             kron = self._rescale_kron_factors(kron, len(y), N)
             kronc = self._rescale_kron_factors(kronc, len(y), N)
             kron *= self.factor
             kronc *= self.factor
-            y = y[:, 0].to("mps") #TODO THIS IS MINE
-            x = {key: value.to("mps") for key, value in x.items()} #TODO THIS IS MINE
+            device_used = next(self.model.parameters()).device
+            y = y[:, 0].to(device_used, non_blocking=True) #TODO THIS IS MINE
+            x = {key: value.to(device_used, non_blocking=True) for key, value in x.items()} #TODO THIS IS MINE
             loss = self.lossfunc(self.model(x), y)
             names_order = list(self.params_dict.keys())
             sizes_of_layers = [

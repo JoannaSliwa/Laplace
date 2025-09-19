@@ -47,6 +47,17 @@ __all__ = [
     "LowRankLaplace",
 ]
 
+def log_mem(tag=""):
+    if torch.cuda.is_available():
+        alloc = torch.cuda.memory_allocated() / 1e9
+        reserved = torch.cuda.memory_reserved() / 1e9
+        peak = torch.cuda.max_memory_allocated() / 1e9
+        print(f"[{tag}] alloc={alloc:.2f} GB reserved={reserved:.2f} GB peak={peak:.2f} GB", flush=True)
+    else:
+        cur = torch.mps.current_allocated_memory()
+        drv = torch.mps.driver_allocated_memory()
+        print(f"[MPS] current={cur / 1e9:.2f} GB, driver={drv / 1e9:.2f} GB")
+
 
 class BaseLaplace:
     """Baseclass for all Laplace approximations in this library.
@@ -95,7 +106,6 @@ class BaseLaplace:
         self,
         model: nn.Module,
         likelihood: Likelihood | str,
-        hessian_str: str = 'none given',
         sigma_noise: float | torch.Tensor = 1.0,
         prior_precision: float | torch.Tensor = 1.0,
         prior_mean: float | torch.Tensor = 0.0,
@@ -132,7 +142,6 @@ class BaseLaplace:
         self.sigma_noise: float | torch.Tensor = sigma_noise
         self.temperature: float = temperature
         self.enable_backprop: bool = enable_backprop
-        self.hessian_str: str = hessian_str
 
         # For models with dict-like inputs (e.g. Huggingface LLMs)
         self.dict_key_x = dict_key_x
@@ -740,7 +749,6 @@ class ParametricLaplace(BaseLaplace):
         self,
         model: nn.Module,
         likelihood: Likelihood | str,
-        hessian_str: str = 'none given',
         sigma_noise: float | torch.Tensor = 1.0,
         prior_precision: float | torch.Tensor = 1.0,
         prior_mean: float | torch.Tensor = 0.0,
@@ -755,7 +763,6 @@ class ParametricLaplace(BaseLaplace):
         super().__init__(
             model,
             likelihood,
-            hessian_str,
             sigma_noise,
             prior_precision,
             prior_mean,
@@ -801,6 +808,8 @@ class ParametricLaplace(BaseLaplace):
             whether to show a progress bar; updated at every batch-Hessian computation.
             Useful for very large model and large amount of data, esp. when `subset_of_weights='all'`.
         """
+        print('beginning')
+        log_mem()
         if override:
             self._init_H()
             self.loss: float | torch.Tensor = 0
@@ -815,6 +824,8 @@ class ParametricLaplace(BaseLaplace):
         data: (
             tuple[torch.Tensor, torch.Tensor] | MutableMapping[str, torch.Tensor | Any]
         ) = next(iter(train_loader))
+        print('before no grad')
+        log_mem()
 
         with torch.no_grad():
             if isinstance(data, MutableMapping):  # To support Huggingface dataset
@@ -843,6 +854,8 @@ class ParametricLaplace(BaseLaplace):
 
         self.model.zero_grad()
         #loss_batch, H_batch, names_, shapes_ = self._curv_closure_mine(train_loader, train_loader['labels'].to(self._device), N=N)
+        print('before others')
+        log_mem()
         loss_batch, H_batch, names_, shapes_ = self._curv_closure_mine(train_loader,
                                                                        train_loader['labels'].to(self._device), N=N)
         self.loss = loss_batch
@@ -1473,7 +1486,6 @@ class FullLaplace(ParametricLaplace):
         self,
         model: nn.Module,
         likelihood: Likelihood | str,
-        hessian_str: str = 'none given',
         sigma_noise: float | torch.Tensor = 1.0,
         prior_precision: float | torch.Tensor = 1.0,
         prior_mean: float | torch.Tensor = 0.0,
@@ -1487,7 +1499,6 @@ class FullLaplace(ParametricLaplace):
         super().__init__(
             model,
             likelihood,
-            hessian_str,
             sigma_noise,
             prior_precision,
             prior_mean,
@@ -1610,7 +1621,6 @@ class KronLaplace(ParametricLaplace):
         self,
         model: nn.Module,
         likelihood: Likelihood | str,
-        hessian_str: str = 'none given',
         sigma_noise: float | torch.Tensor = 1.0,
         prior_precision: float | torch.Tensor = 1.0,
         prior_mean: float | torch.Tensor = 0.0,
@@ -1623,12 +1633,16 @@ class KronLaplace(ParametricLaplace):
         backend_kwargs: dict[str, Any] | None = None,
         asdl_fisher_kwargs: dict[str, Any] | None = None,
     ):
+
+
+        backend_kwargs = {} if backend_kwargs is None else dict(backend_kwargs)
+        self.hessian_str = backend_kwargs.pop("hessian_str", "kron")
+
         self.damping: bool = damping
         self.H_facs: Kron | None = None
         super().__init__(
             model,
             likelihood,
-            hessian_str,
             sigma_noise,
             prior_precision,
             prior_mean,
@@ -1664,7 +1678,8 @@ class KronLaplace(ParametricLaplace):
         y: torch.Tensor,
         N: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.backend.kron(X, y, hessian_str=self.hessian_str, N=N,**self._asdl_fisher_kwargs)
+        #return self.backend.kron(X, y, N=N,**self._asdl_fisher_kwargs)
+        return self.backend.kron(X, y, N=N,hessian_str = self.hessian_str,**self._asdl_fisher_kwargs)
 
 
 
@@ -1797,7 +1812,6 @@ class LowRankLaplace(ParametricLaplace):
         self,
         model: nn.Module,
         likelihood: Likelihood | str,
-        hessian_str: str = 'none given',
         backend: type[CurvatureInterface] = AsdfghjklHessian
         if find_spec("asdfghjkl") is not None
         else CurvatureInterface,
@@ -1819,7 +1833,6 @@ class LowRankLaplace(ParametricLaplace):
         super().__init__(
             model,
             likelihood,
-            hessian_str,
             sigma_noise=sigma_noise,
             prior_precision=prior_precision,
             prior_mean=prior_mean,
@@ -1954,6 +1967,7 @@ class DiagLaplace(ParametricLaplace):
         y: torch.Tensor,
         N: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+
         return self.backend.diag_mine(X, y, N=N, **self._asdl_fisher_kwargs)
 
     def _curv_closure(
@@ -2067,7 +2081,6 @@ class FunctionalLaplace(BaseLaplace):
         self,
         model: nn.Module,
         likelihood: Likelihood | str,
-        hessian_str: str = 'none given',
         n_subset: int = -1,
         sigma_noise: float | torch.Tensor = 1.0,
         prior_precision: float | torch.Tensor = 1.0,
@@ -2086,7 +2099,6 @@ class FunctionalLaplace(BaseLaplace):
         super().__init__(
             model,
             likelihood,
-            hessian_str,
             sigma_noise,
             prior_precision,
             prior_mean,
